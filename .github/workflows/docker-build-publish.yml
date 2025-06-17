@@ -1,0 +1,160 @@
+name: Build and Publish Docker Images
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'apps/**'
+      - 'shared/**'
+      - '.github/workflows/docker-build-publish.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'apps/**'
+      - 'shared/**'
+  release:
+    types: [published]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      apps: ${{ steps.detect.outputs.apps }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed apps
+        id: detect
+        run: |
+          # Find all apps with Dockerfiles
+          apps=$(find apps -name "Dockerfile" -type f | sed 's|/Dockerfile||' | sed 's|apps/||' | jq -R -s -c 'split("\n")[:-1]')
+          echo "Available apps: $apps"
+
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            # On release, build all apps
+            echo "apps=$apps" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            # On PR, only build changed apps for validation
+            changed_files=$(git diff --name-only ${{ github.event.pull_request.base.sha }} ${{ github.event.pull_request.head.sha }})
+            changed_apps=$(echo "$changed_files" | grep -E '^apps/[^/]+/' | cut -d'/' -f2 | sort -u | jq -R -s -c 'split("\n")[:-1] | map(select(. != ""))')
+
+            # Also check if shared package changed, then build all apps
+            if echo "$changed_files" | grep -q '^shared/'; then
+              echo "Shared package changed, building all apps"
+              echo "apps=$apps" >> $GITHUB_OUTPUT
+            else
+              echo "apps=$changed_apps" >> $GITHUB_OUTPUT
+            fi
+          else
+            # On push to main/develop, build changed apps or all if shared changed
+            if [[ "${{ github.ref }}" == "refs/heads/main" ]] || [[ "${{ github.ref }}" == "refs/heads/develop" ]]; then
+              changed_files=$(git diff --name-only HEAD^ HEAD)
+              changed_apps=$(echo "$changed_files" | grep -E '^apps/[^/]+/' | cut -d'/' -f2 | sort -u | jq -R -s -c 'split("\n")[:-1] | map(select(. != ""))')
+
+              # Check if shared package changed
+              if echo "$changed_files" | grep -q '^shared/'; then
+                echo "Shared package changed, building all apps"
+                echo "apps=$apps" >> $GITHUB_OUTPUT
+              else
+                echo "apps=$changed_apps" >> $GITHUB_OUTPUT
+              fi
+            else
+              echo "apps=[]" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+  build-and-publish:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.apps != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        app: ${{ fromJson(needs.detect-changes.outputs.apps) }}
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.app }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix={{branch}}-
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./apps/${{ matrix.app }}/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Generate artifact attestation
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.app }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  security-scan:
+    needs: [detect-changes, build-and-publish]
+    if: needs.detect-changes.outputs.apps != '[]' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        app: ${{ fromJson(needs.detect-changes.outputs.apps) }}
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+
+    steps:
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.app }}:${{ github.ref_name }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'

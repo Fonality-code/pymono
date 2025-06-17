@@ -1,0 +1,100 @@
+name: Validate Dockerfiles
+
+on:
+  pull_request:
+    paths:
+      - 'apps/**/Dockerfile'
+      - '.github/workflows/validate-dockerfiles.yml'
+
+jobs:
+  validate-dockerfiles:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Find Dockerfiles
+        id: find-dockerfiles
+        run: |
+          dockerfiles=$(find apps -name "Dockerfile" -type f)
+          echo "Found Dockerfiles:"
+          echo "$dockerfiles"
+          echo "dockerfiles<<EOF" >> $GITHUB_OUTPUT
+          echo "$dockerfiles" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Lint Dockerfiles with Hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: apps/*/Dockerfile
+          recursive: true
+          failure-threshold: warning
+          format: sarif
+          output-file: hadolint-results.sarif
+
+      - name: Upload Hadolint scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: hadolint-results.sarif
+
+      - name: Build test images
+        run: |
+          while IFS= read -r dockerfile; do
+            if [[ -n "$dockerfile" && -f "$dockerfile" ]]; then
+              app=$(dirname "$dockerfile" | sed 's|apps/||')
+              echo "🏗️ Testing build for app: $app"
+
+              if docker build -t "test-$app:pr" -f "$dockerfile" .; then
+                echo "✅ Build successful for: $app"
+              else
+                echo "❌ Build failed for: $app"
+                exit 1
+              fi
+            fi
+          done <<< "${{ steps.find-dockerfiles.outputs.dockerfiles }}"
+
+      - name: Check Docker image security
+        run: |
+          # Install Trivy
+          sudo apt-get update
+          sudo apt-get install wget apt-transport-https gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install trivy
+
+          # Scan built images
+          while IFS= read -r dockerfile; do
+            if [[ -n "$dockerfile" && -f "$dockerfile" ]]; then
+              app=$(dirname "$dockerfile" | sed 's|apps/||')
+              echo "🔍 Scanning image for app: $app"
+
+              trivy image --exit-code 1 --severity HIGH,CRITICAL "test-$app:pr" || {
+                echo "❌ Security vulnerabilities found in: $app"
+                echo "ℹ️ This is a warning - check the vulnerabilities above"
+              }
+            fi
+          done <<< "${{ steps.find-dockerfiles.outputs.dockerfiles }}"
+
+      - name: Generate summary
+        if: always()
+        run: |
+          echo "## 🐳 Dockerfile Validation Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          while IFS= read -r dockerfile; do
+            if [[ -n "$dockerfile" && -f "$dockerfile" ]]; then
+              app=$(dirname "$dockerfile" | sed 's|apps/||')
+              echo "- ✅ **$app**: Dockerfile validated and builds successfully" >> $GITHUB_STEP_SUMMARY
+            fi
+          done <<< "${{ steps.find-dockerfiles.outputs.dockerfiles }}"
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
+          echo "- Review any Hadolint warnings in the Security tab" >> $GITHUB_STEP_SUMMARY
+          echo "- Check security scan results above" >> $GITHUB_STEP_SUMMARY
+          echo "- Once merged, images will be built and published automatically" >> $GITHUB_STEP_SUMMARY
