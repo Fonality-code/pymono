@@ -1,0 +1,27 @@
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    container_name: mono-api
+    ports:
+      - "8080:8000"
+    environment:
+      - PYTHONPATH=/dev/shared/src:/dev/apps/api/src
+    volumes:
+      # Mount source code for development (optional - remove for production)
+      - ../apps/api:/dev/apps/api
+      - ../shared:/dev/shared
+    networks:
+      - mono-network
+    restart: unless-stopped
+
+
+networks:
+  mono-network:
+    driver: bridge
+
+# Uncomment if you need persistent data storage
+# volumes:
+#   api_data:
+#     driver: local

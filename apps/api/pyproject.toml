@@ -1,0 +1,18 @@
+[project]
+name = "api"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.13",
+    #local
+    "shared",
+    "uvicorn>=0.34.3",
+]
+
+
+
+# ref: https://github.com/astral-sh/uv/issues/6371
+[tool.uv.sources]
+shared = { path="../../shared", editable=true }

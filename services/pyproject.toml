@@ -7,8 +7,15 @@ authors = [
     { name = "Fon Godwill Ivan Tana", email = "ivan8tana@gmail.com" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    # local
+    "shared",
+]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# ref: https://github.com/astral-sh/uv/issues/6371
+[tool.uv.sources]
+shared = { path="../shared", editable=true }
